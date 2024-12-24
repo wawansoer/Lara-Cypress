@@ -7,27 +7,27 @@ ARG COMPOSER_VERSION=latest
 # Build frontend assets with Bun
 ###########################################
 
-ARG NPM_VERSION="latest"
+ARG BUN_VERSION="latest"
 
-FROM node:${NPM_VERSION} AS build
+FROM oven/bun:${BUN_VERSION} AS build
 
 ENV ROOT=/var/www/html
 
 WORKDIR ${ROOT}
 
-COPY --link package.json ./
+COPY --link package.json bun.lockb* ./
 
-RUN npm install
+RUN bun install --frozen-lockfile
 
 COPY --link . .
 
-RUN npm run build
+RUN bun run build
 
 ###########################################
 
 FROM composer:${COMPOSER_VERSION} AS vendor
 
-FROM php:${PHP_VERSION}-cli-bookworm
+FROM php:${PHP_VERSION}-cli-alpine
 
 LABEL maintainer="SMortexa <seyed.me720@gmail.com>"
 LABEL org.opencontainers.image.title="Laravel Octane Dockerfile"
@@ -39,11 +39,10 @@ ARG WWWUSER=1000
 ARG WWWGROUP=1000
 ARG TZ=UTC
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    TERM=xterm-color \
+ENV TERM=xterm-color \
     WITH_HORIZON=false \
     WITH_SCHEDULER=false \
-    OCTANE_SERVER=roadrunner \
+    OCTANE_SERVER=swoole \
     USER=octane \
     ROOT=/var/www/html \
     COMPOSER_FUND=0 \
@@ -51,17 +50,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 WORKDIR ${ROOT}
 
-SHELL ["/bin/bash", "-eou", "pipefail", "-c"]
+SHELL ["/bin/sh", "-eou", "pipefail", "-c"]
 
 RUN ln -snf /usr/share/zoneinfo/${TZ} /etc/localtime \
-  && echo ${TZ} > /etc/timezone
+    && echo ${TZ} > /etc/timezone
 
 ADD --chmod=0755 https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
 
-RUN apt-get update; \
-    apt-get upgrade -yqq; \
-    apt-get install -yqq --no-install-recommends --show-progress \
-    apt-utils \
+RUN apk update; \
+    apk upgrade; \
+    apk add --no-cache \
     curl \
     wget \
     vim \
@@ -91,13 +89,11 @@ RUN apt-get update; \
     memcached \
     igbinary \
     ldap \
-    && apt-get -y autoremove \
-    && apt-get clean \
+    swoole \
     && docker-php-source delete \
-    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
-    && rm /var/log/lastlog /var/log/faillog
+    && rm -rf /var/cache/apk/* /tmp/* /var/tmp/*
 
-RUN arch="$(uname -m)" \
+RUN arch="$(apk --print-arch)" \
     && case "$arch" in \
     armhf) _cronic_fname='supercronic-linux-arm' ;; \
     aarch64) _cronic_fname='supercronic-linux-arm64' ;; \
@@ -111,12 +107,12 @@ RUN arch="$(uname -m)" \
     && mkdir -p /etc/supercronic \
     && echo "*/1 * * * * php ${ROOT}/artisan schedule:run --no-interaction" > /etc/supercronic/laravel
 
-RUN userdel --remove --force www-data \
-    && groupadd --force -g ${WWWGROUP} ${USER} \
-    && useradd -ms /bin/bash --no-log-init --no-user-group -g ${WWWGROUP} -u ${WWWUSER} ${USER}
+RUN addgroup -g ${WWWGROUP} ${USER} \
+    && adduser -D -h ${ROOT} -G ${USER} -u ${WWWUSER} -s /bin/sh ${USER}
 
-RUN chown -R ${USER}:${USER} ${ROOT} /var/{log,run} \
-    && chmod -R a+rw ${ROOT} /var/{log,run}
+RUN mkdir -p /var/log/supervisor /var/run/supervisor \
+    && chown -R ${USER}:${USER} ${ROOT} /var/log /var/run \
+    && chmod -R a+rw ${ROOT} /var/log /var/run
 
 RUN cp ${PHP_INI_DIR}/php.ini-production ${PHP_INI_DIR}/php.ini
 
@@ -137,15 +133,17 @@ COPY --link --chown=${WWWUSER}:${WWWUSER} . .
 COPY --link --chown=${WWWUSER}:${WWWUSER} --from=build ${ROOT}/public public
 
 RUN mkdir -p \
-    storage/framework/{sessions,views,cache,testing} \
+    storage/framework/sessions \
+    storage/framework/views \
+    storage/framework/cache \
+    storage/framework/testing \
     storage/logs \
     bootstrap/cache && chmod -R a+rw storage
 
 COPY --link --chown=${WWWUSER}:${WWWUSER} deployment/supervisord.conf /etc/supervisor/
-COPY --link --chown=${WWWUSER}:${WWWUSER} deployment/octane/RoadRunner/supervisord.roadrunner.conf /etc/supervisor/conf.d
+COPY --link --chown=${WWWUSER}:${WWWUSER} deployment/octane/Swoole/supervisord.swoole.conf /etc/supervisor/conf.d/
 COPY --link --chown=${WWWUSER}:${WWWUSER} deployment/supervisord.*.conf /etc/supervisor/conf.d/
 COPY --link --chown=${WWWUSER}:${WWWUSER} deployment/php.ini ${PHP_INI_DIR}/conf.d/99-octane.ini
-COPY --link --chown=${WWWUSER}:${WWWUSER} deployment/octane/RoadRunner/.rr.prod.yaml ./.rr.yaml
 COPY --link --chown=${WWWUSER}:${WWWUSER} deployment/start-container /usr/local/bin/start-container
 COPY --link --chown=${WWWUSER}:${WWWUSER} deployment/healthcheck /usr/local/bin/healthcheck
 
@@ -156,17 +154,11 @@ RUN composer install \
     --no-dev \
     && composer clear-cache
 
-RUN if composer show | grep spiral/roadrunner-cli >/dev/null; then \
-    ./vendor/bin/rr get-binary --quiet; else \
-    echo "`spiral/roadrunner-cli` package is not installed. Exiting..."; exit 1; \
-    fi
-
-RUN chmod +x rr /usr/local/bin/start-container /usr/local/bin/healthcheck
+RUN chmod +x /usr/local/bin/start-container /usr/local/bin/healthcheck
 
 RUN cat deployment/utilities.sh >> ~/.bashrc
 
 EXPOSE 8000
-EXPOSE 6001
 
 ENTRYPOINT ["start-container"]
 
